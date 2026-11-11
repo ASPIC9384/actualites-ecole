@@ -97,9 +97,14 @@ def save(filename, data):
 
 
 def fetch(url):
-    request = Request(
-        url,
-        headers={"User-Agent": "Mozilla/5.0"}
+    from urllib.parse import quote
+
+safe_url = quote(url, safe=":/?=&%")
+
+request = Request(
+    safe_url,
+    headers={"User-Agent": "Mozilla/5.0"}
+)
     )
     with urlopen(request, timeout=25) as response:
         html = response.read().decode(
