@@ -4,83 +4,93 @@ import hashlib
 import re
 from datetime import datetime, timezone
 from html.parser import HTMLParser
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin, urlparse, quote
 from urllib.request import Request, urlopen
 
 BASE = "https://ecoleleslauriersroses-millau.jimdofree.com/"
 DOMAIN = urlparse(BASE).netloc
-MAX_PAGES = 150
 
 
-class PageParser(HTMLParser):
+class JimdoParser(HTMLParser):
     def __init__(self):
         super().__init__()
         self.links = set()
-        self.articles = []
-        self.current = None
-        self.capture = False
-        self.heading = []
-        self.skip = 0
+        self.modules = []
+        self.stack = []
+        self.active = None
+        self.heading_depth = 0
 
     def handle_starttag(self, tag, attrs):
         attrs = dict(attrs)
-
-        if tag in ("script", "style", "noscript", "svg"):
-            self.skip += 1
-            return
-
-        if self.skip:
-            return
+        classes = attrs.get("class", "").split()
 
         if tag == "a" and attrs.get("href"):
             self.links.add(urljoin(BASE, attrs["href"]))
 
-        if tag == "h2":
-            self.finish_article()
-            self.current = {
-                "titre": "",
-                "texte": [],
-                "image": None
+        module = None
+        if tag == "div" and "j-module" in classes:
+            kind = next(
+                (c for c in classes if c.startswith("j-")),
+                ""
+            )
+            module = {
+                "kind": kind,
+                "title": "",
+                "text": [],
+                "images": []
             }
-            self.capture = True
-            self.heading = []
+            self.modules.append(module)
 
-        if tag == "img" and self.current:
-            src = attrs.get("data-src") or attrs.get("src")
-            if src and not self.current["image"]:
-                self.current["image"] = urljoin(BASE, src)
+        self.stack.append((tag, module))
+
+        if module is not None:
+            self.active = module
+
+        if tag in ("h1", "h2", "h3") and self.active:
+            self.heading_depth += 1
+
+        if tag == "img" and self.active:
+            src = (
+                attrs.get("data-src")
+                or attrs.get("src")
+            )
+            if src:
+                image = urljoin(BASE, src)
+                if image not in self.active["images"]:
+                    self.active["images"].append(image)
 
     def handle_endtag(self, tag):
-        if tag in ("script", "style", "noscript", "svg"):
-            self.skip = max(0, self.skip - 1)
-            return
+        if tag in ("h1", "h2", "h3"):
+            self.heading_depth = max(
+                0, self.heading_depth - 1
+            )
 
-        if tag == "h2" and self.capture:
-            if self.current:
-                self.current["titre"] = " ".join(self.heading)
-            self.capture = False
+        while self.stack:
+            opened, module = self.stack.pop()
+            if opened == tag:
+                break
+
+        self.active = next(
+            (
+                module
+                for _, module in reversed(self.stack)
+                if module is not None
+            ),
+            None
+        )
 
     def handle_data(self, data):
-        if self.skip or not self.current:
+        if not self.active:
             return
 
-        data = " ".join(data.split())
-        if not data:
+        value = " ".join(data.split())
+        if not value:
             return
 
-        if self.capture:
-            self.heading.append(data)
+        if self.heading_depth:
+            self.active["title"] += value + " "
         else:
-            self.current["texte"].append(data)
-
-    def finish_article(self):
-        if self.current and self.current["titre"]:
-            self.articles.append(self.current)
-        self.current = None
-
-    def close(self):
-        super().close()
-        self.finish_article()
+            self.active["text"].append(value)
 
 
 def load(filename, default):
@@ -96,12 +106,8 @@ def save(filename, data):
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
-
 def fetch(url):
-    from urllib.parse import quote
-
     safe_url = quote(url, safe=":/?=&%")
-
     request = Request(
         safe_url,
         headers={"User-Agent": "Mozilla/5.0"}
@@ -112,11 +118,10 @@ def fetch(url):
             "utf-8", errors="replace"
         )
 
-    parser = PageParser()
+    parser = JimdoParser()
     parser.feed(html)
     parser.close()
     return parser
-
 
 
 def internal(url):
@@ -125,32 +130,99 @@ def internal(url):
         parsed.netloc == DOMAIN
         and parsed.path.endswith("/")
         and not parsed.query
-        and not parsed.fragment
     )
 
 
-def article_id(url, title):
-    normalized = re.sub(
-        r"\s+", " ", title.strip().lower()
-    )
-    return hashlib.sha256(
-        (url + "|" + normalized).encode("utf-8")
-    ).hexdigest()
+def clean(value):
+    return re.sub(r"\s+", " ", value).strip()
 
 
-known = load("articles-connus.json", None)
-first_run = known is None
+def extract_articles(modules, url):
+    articles = []
+    current = None
 
-if first_run:
+    for module in modules:
+        kind = module["kind"]
+        title = clean(module["title"])
+        content = clean(" ".join(module["text"]))
+
+        if kind == "j-header" and title:
+            if current:
+                articles.append(current)
+
+            current = {
+                "titre": title,
+                "texte": [],
+                "images": [],
+                "lien": url
+            }
+
+        elif current:
+            if kind in (
+                "j-text",
+                "j-imageSubtitle",
+                "j-gallery"
+            ):
+                if content:
+                    current["texte"].append(content)
+
+                for img in module["images"]:
+                    if img not in current["images"]:
+                        current["images"].append(img)
+
+    if current:
+        articles.append(current)
+
+    results = []
+
+    for article in articles:
+        content = clean(" ".join(article["texte"]))
+
+        if len(content) < 40:
+            continue
+
+        title = article["titre"]
+        identifier = hashlib.sha256(
+            (url + "|" + title.lower()).encode("utf-8")
+        ).hexdigest()
+
+        images = [
+            img for img in article["images"]
+            if not any(
+                word in img.lower()
+                for word in ("logo", "favicon", "icon")
+            )
+        ]
+
+        results.append({
+            "id": identifier,
+            "titre": title,
+            "resume": content[:180] + (
+                "..." if len(content) > 180 else ""
+            ),
+            "image": images[0] if images else None,
+            "lien": url
+        })
+
+    return results
+
+
+# Nouveau fichier de référence pour cette version.
+known = load("articles-jimdo-v2.json", None)
+initial = known is None
+
+if initial:
     known = {}
 
-history = load("historique-articles.json", [])
+history = load("historique-articles-v2.json", [])
 queue = [BASE]
 visited = set()
 new_articles = []
+detected = 0
+
 now = datetime.now(timezone.utc).isoformat()
 
-while queue and len(visited) < MAX_PAGES:
+while queue and len(visited) < 150:
     url = queue.pop(0).split("#")[0].split("?")[0]
 
     if url in visited or not internal(url):
@@ -161,36 +233,24 @@ while queue and len(visited) < MAX_PAGES:
     try:
         page = fetch(url)
     except Exception as error:
-        print(f"Erreur sur {url}: {error}")
+        print(f"Erreur : {url} : {error}")
         continue
 
-    for article in page.articles:
-        title = article["titre"].strip()
-        content = " ".join(article["texte"]).strip()
+    articles = extract_articles(page.modules, url)
+    detected += len(articles)
 
-        if not title or len(content) < 40:
-            continue
-
-        identifier = article_id(url, title)
+    for article in articles:
+        identifier = article["id"]
 
         if identifier not in known:
             known[identifier] = {
-                "titre": title,
+                "titre": article["titre"],
                 "lien": url
             }
 
-            if not first_run:
-                new_articles.append({
-                    "id": identifier,
-                    "titre": title,
-                    "resume": (
-                        content[:180]
-                        + ("..." if len(content) > 180 else "")
-                    ),
-                    "image": article["image"],
-                    "lien": url,
-                    "date": now
-                })
+            if not initial:
+                article["date"] = now
+                new_articles.append(article)
 
     for link in sorted(page.links):
         link = link.split("#")[0].split("?")[0]
@@ -202,10 +262,8 @@ while queue and len(visited) < MAX_PAGES:
         ):
             queue.append(link)
 
-# Les nouvelles publications détectées lors
-# d'une même exécution sont conservées ensemble.
+# Conserver les nouveautés sans doublons.
 history = new_articles + history
-
 unique = []
 seen = set()
 
@@ -214,14 +272,19 @@ for article in history:
         unique.append(article)
         seen.add(article["id"])
 
-save("articles-connus.json", known)
-save("historique-articles.json", unique[:50])
-save("actualites.json", unique[:3])
+save("articles-jimdo-v2.json", known)
+save("historique-articles-v2.json", unique[:50])
+
+# Ne pas remplacer le fichier public tant que
+# cette nouvelle détection n'est pas validée.
+save("actualites-test.json", unique[:3])
 
 print(f"Pages visitées : {len(visited)}")
-print(f"Articles connus : {len(known)}")
+print(f"Articles candidats détectés : {detected}")
+print(f"Articles mémorisés : {len(known)}")
 print(f"Nouveaux articles : {len(new_articles)}")
-print(f"Actualités affichables : {len(unique[:3])}")
 
-if first_run:
-    print("Référence initiale créée.")
+if initial:
+    print("Nouvelle référence initiale créée.")
+PY
+python -m py_compile /mnt/data/actualites_test.py && echo OK"]} text?
