@@ -105,7 +105,7 @@ request = Request(
     safe_url,
     headers={"User-Agent": "Mozilla/5.0"}
 )
-    )
+    
     with urlopen(request, timeout=25) as response:
         html = response.read().decode(
             "utf-8", errors="replace"
