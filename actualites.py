@@ -96,16 +96,17 @@ def save(filename, data):
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
+
 def fetch(url):
     from urllib.parse import quote
 
-safe_url = quote(url, safe=":/?=&%")
+    safe_url = quote(url, safe=":/?=&%")
 
-request = Request(
-    safe_url,
-    headers={"User-Agent": "Mozilla/5.0"}
-)
-    
+    request = Request(
+        safe_url,
+        headers={"User-Agent": "Mozilla/5.0"}
+    )
+
     with urlopen(request, timeout=25) as response:
         html = response.read().decode(
             "utf-8", errors="replace"
@@ -115,6 +116,7 @@ request = Request(
     parser.feed(html)
     parser.close()
     return parser
+
 
 
 def internal(url):
