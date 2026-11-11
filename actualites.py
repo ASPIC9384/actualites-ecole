@@ -16,15 +16,11 @@ class PageParser(HTMLParser):
     def __init__(self):
         super().__init__()
         self.links = set()
-        self.images = []
-        self.content = []
-        self.title = ""
-        self.heading = ""
+        self.articles = []
+        self.current = None
+        self.capture = False
+        self.heading = []
         self.skip = 0
-        self.in_title = False
-        self.in_heading = False
-        self.in_main = False
-        self.main_depth = 0
 
     def handle_starttag(self, tag, attrs):
         attrs = dict(attrs)
@@ -36,66 +32,68 @@ class PageParser(HTMLParser):
         if self.skip:
             return
 
-        if tag == "title":
-            self.in_title = True
-
-        if tag == "main" or (
-            tag in ("div", "section")
-            and (
-                "jtpl-content" in attrs.get("class", "")
-                or "j-module" in attrs.get("class", "")
-            )
-        ):
-            self.in_main = True
-
-        if tag in ("h1", "h2") and self.in_main:
-            self.in_heading = True
-
         if tag == "a" and attrs.get("href"):
             self.links.add(urljoin(BASE, attrs["href"]))
 
-        if tag == "img":
-            src = (
-                attrs.get("data-src")
-                or attrs.get("src")
-                or ""
-            )
-            if src:
-                self.images.append(urljoin(BASE, src))
+        if tag == "h2":
+            self.finish_article()
+            self.current = {
+                "titre": "",
+                "texte": [],
+                "image": None
+            }
+            self.capture = True
+            self.heading = []
+
+        if tag == "img" and self.current:
+            src = attrs.get("data-src") or attrs.get("src")
+            if src and not self.current["image"]:
+                self.current["image"] = urljoin(BASE, src)
 
     def handle_endtag(self, tag):
         if tag in ("script", "style", "noscript", "svg"):
             self.skip = max(0, self.skip - 1)
             return
 
-        if tag == "title":
-            self.in_title = False
-
-        if tag in ("h1", "h2"):
-            self.in_heading = False
+        if tag == "h2" and self.capture:
+            if self.current:
+                self.current["titre"] = " ".join(self.heading)
+            self.capture = False
 
     def handle_data(self, data):
-        if self.skip:
+        if self.skip or not self.current:
             return
 
         data = " ".join(data.split())
         if not data:
             return
 
-        if self.in_title:
-            self.title += data
-        elif self.in_main:
-            self.content.append(data)
-            if self.in_heading and not self.heading:
-                self.heading = data
+        if self.capture:
+            self.heading.append(data)
+        else:
+            self.current["texte"].append(data)
+
+    def finish_article(self):
+        if self.current and self.current["titre"]:
+            self.articles.append(self.current)
+        self.current = None
+
+    def close(self):
+        super().close()
+        self.finish_article()
 
 
-def read_json(filename, default):
+def load(filename, default):
     try:
         with open(filename, encoding="utf-8") as f:
             return json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         return default
+
+
+def save(filename, data):
+    with open(filename, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
 
 
 def fetch(url):
@@ -110,6 +108,7 @@ def fetch(url):
 
     parser = PageParser()
     parser.feed(html)
+    parser.close()
     return parser
 
 
@@ -119,15 +118,29 @@ def internal(url):
         parsed.netloc == DOMAIN
         and parsed.path.endswith("/")
         and not parsed.query
+        and not parsed.fragment
     )
 
 
-previous = read_json("etat-pages.json", {})
-history = read_json("historique.json", [])
+def article_id(url, title):
+    normalized = re.sub(
+        r"\s+", " ", title.strip().lower()
+    )
+    return hashlib.sha256(
+        (url + "|" + normalized).encode("utf-8")
+    ).hexdigest()
 
-current = {}
+
+known = load("articles-connus.json", None)
+first_run = known is None
+
+if first_run:
+    known = {}
+
+history = load("historique-articles.json", [])
 queue = [BASE]
 visited = set()
+new_articles = []
 now = datetime.now(timezone.utc).isoformat()
 
 while queue and len(visited) < MAX_PAGES:
@@ -141,60 +154,40 @@ while queue and len(visited) < MAX_PAGES:
     try:
         page = fetch(url)
     except Exception as error:
-        print(f"Erreur : {url} : {error}")
+        print(f"Erreur sur {url}: {error}")
         continue
 
-    content = " ".join(page.content)
-    if not content:
-        print(f"Contenu introuvable : {url}")
-        continue
+    for article in page.articles:
+        title = article["titre"].strip()
+        content = " ".join(article["texte"]).strip()
 
-    fingerprint = hashlib.sha256(
-        content.encode("utf-8")
-    ).hexdigest()
+        if not title or len(content) < 40:
+            continue
 
-    current[url] = fingerprint
+        identifier = article_id(url, title)
 
-    changed = (
-        url in previous
-        and previous[url] != fingerprint
-    )
-    new_page = url not in previous
+        if identifier not in known:
+            known[identifier] = {
+                "titre": title,
+                "lien": url
+            }
 
-    if changed or new_page:
-        title = (
-            page.heading
-            or page.title.split("|")[0].strip()
-            or "Actualité de l'école"
-        )
-
-        image = next(
-            (
-                img for img in page.images
-                if not any(
-                    word in img.lower()
-                    for word in (
-                        "logo", "icon", "favicon",
-                        "avatar", "button"
-                    )
-                )
-            ),
-            None
-        )
-
-        history.insert(0, {
-            "titre": title,
-            "resume": (
-                content[:180]
-                + ("..." if len(content) > 180 else "")
-            ),
-            "image": image,
-            "lien": url,
-            "date": now
-        })
+            if not first_run:
+                new_articles.append({
+                    "id": identifier,
+                    "titre": title,
+                    "resume": (
+                        content[:180]
+                        + ("..." if len(content) > 180 else "")
+                    ),
+                    "image": article["image"],
+                    "lien": url,
+                    "date": now
+                })
 
     for link in sorted(page.links):
         link = link.split("#")[0].split("?")[0]
+
         if (
             internal(link)
             and link not in visited
@@ -202,28 +195,26 @@ while queue and len(visited) < MAX_PAGES:
         ):
             queue.append(link)
 
-# Conserver uniquement la dernière modification
-# détectée pour chaque page.
+# Les nouvelles publications détectées lors
+# d'une même exécution sont conservées ensemble.
+history = new_articles + history
+
 unique = []
 seen = set()
 
-for item in history:
-    if item["lien"] not in seen:
-        unique.append(item)
-        seen.add(item["lien"])
+for article in history:
+    if article["id"] not in seen:
+        unique.append(article)
+        seen.add(article["id"])
 
-# Ne pas perdre les empreintes des pages
-# temporairement inaccessibles.
-current = {**previous, **current}
+save("articles-connus.json", known)
+save("historique-articles.json", unique[:50])
+save("actualites.json", unique[:3])
 
-with open("etat-pages.json", "w", encoding="utf-8") as f:
-    json.dump(current, f, ensure_ascii=False, indent=2)
+print(f"Pages visitées : {len(visited)}")
+print(f"Articles connus : {len(known)}")
+print(f"Nouveaux articles : {len(new_articles)}")
+print(f"Actualités affichables : {len(unique[:3])}")
 
-with open("historique.json", "w", encoding="utf-8") as f:
-    json.dump(unique[:30], f, ensure_ascii=False, indent=2)
-
-with open("actualites.json", "w", encoding="utf-8") as f:
-    json.dump(unique[:3], f, ensure_ascii=False, indent=2)
-
-print(f"Pages examinées : {len(visited)}")
-print(f"Actualités disponibles : {len(unique[:3])}")
+if first_run:
+    print("Référence initiale créée.")
