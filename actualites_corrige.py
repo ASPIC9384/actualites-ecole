@@ -156,6 +156,7 @@ def main():
     queue = deque([BASE])
     visited = set()
     discovered = []
+    active_ids = set()
     detected = 0
     failures = 0
     now = datetime.now(timezone.utc).isoformat()
@@ -173,6 +174,7 @@ def main():
         articles = extract_articles(page.modules, url)
         detected += len(articles)
         for article in articles:
+            active_ids.add(article['id'])
             if article['id'] not in known:
                 known[article['id']] = {'titre': article['titre'], 'lien': url, 'premiere_detection': now}
                 if not initial:
@@ -183,7 +185,11 @@ def main():
             if internal(link) and link not in visited and link not in queue:
                 queue.append(link)
     # Preserve already published test history, without claiming initial content is new.
-    merged = discovered + history
+    merged = discovered + [
+    article for article in history
+    if article['id'] in active_ids
+    or article['lien'] not in visited
+]
     unique, seen = [], set()
     for article in merged:
         if article['id'] not in seen:
