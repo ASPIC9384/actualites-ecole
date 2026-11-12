@@ -29,8 +29,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add articles-jimdo-v2.json historique-articles-v2.json actualites-test.json
-
+          git add articles-jimdo-v3.json historique-articles-v3.json actualites-test.json
           if ! git diff --cached --quiet; then
             git commit -m "Mise à jour automatique des actualités"
             git push
