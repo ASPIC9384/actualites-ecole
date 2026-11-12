@@ -23,7 +23,7 @@ jobs:
           python-version: "3.12"
 
       - name: Vérifier les actualités
-        run: python actualites.py
+        run: python actualites_corrige.py
 
       - name: Enregistrer les résultats
         run: |
