@@ -29,10 +29,15 @@ class JimdoParser(HTMLParser):
 
         module = None
         if tag == "div" and "j-module" in classes:
-            kind = next(
-                (c for c in classes if c.startswith("j-")),
-                ""
-            )
+            
+kind = next(
+    (
+        c for c in classes
+        if c.startswith("j-") and c != "j-module"
+    ),
+    ""
+)
+
             module = {
                 "kind": kind,
                 "title": "",
