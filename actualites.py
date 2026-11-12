@@ -286,5 +286,3 @@ print(f"Nouveaux articles : {len(new_articles)}")
 
 if initial:
     print("Nouvelle référence initiale créée.")
-PY
-python -m py_compile /mnt/data/actualites_test.py && echo OK"]} text?
